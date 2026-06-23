@@ -7,7 +7,7 @@ android {
     namespace = "com.arm.aichat"
     compileSdk = 36
 
-    ndkVersion = "29.0.13113456"
+    ndkVersion = "29.0.14206865"
 
     defaultConfig {
         minSdk = 33
@@ -46,14 +46,14 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
     kotlin {
-        jvmToolchain(17)
+        jvmToolchain(21)
 
         compileOptions {
-            targetCompatibility = JavaVersion.VERSION_17
+            targetCompatibility = JavaVersion.VERSION_21
         }
     }
 
