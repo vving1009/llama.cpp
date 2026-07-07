@@ -556,9 +556,11 @@ std::string common_chat_format_single(const struct common_chat_templates * tmpls
                                       const std::vector<common_chat_msg> & past_msg,
                                       const common_chat_msg &              new_msg,
                                       bool                                 add_ass,
-                                      bool                                 use_jinja) {
+                                      bool                                 use_jinja,
+                                      bool                                 enable_thinking) {
     common_chat_templates_inputs inputs;
-    inputs.use_jinja = use_jinja;
+    inputs.use_jinja      = use_jinja;
+    inputs.enable_thinking = enable_thinking;
     inputs.add_bos   = tmpls->add_bos;
     inputs.add_eos   = tmpls->add_eos;
 

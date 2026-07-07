@@ -26,6 +26,16 @@ interface InferenceEngine {
     suspend fun setSystemPrompt(systemPrompt: String)
 
     /**
+     * Controls whether the model emits thinking/reasoning content.
+     *
+     * Mirrors llama.cpp CLI "--reasoning off": feeds enable_thinking into the
+     * jinja chat template so models like Qwen3 skip the thinking block entirely.
+     * Must be called before [setSystemPrompt] for it to take effect on the
+     * system prompt formatting.
+     */
+    suspend fun setThinkingEnabled(enabled: Boolean)
+
+    /**
      * Sends a user prompt to the loaded model and returns a Flow of generated tokens.
      */
     fun sendUserPrompt(message: String, predictLength: Int = DEFAULT_PREDICT_LENGTH): Flow<String>

@@ -39,6 +39,12 @@ static llama_batch                        g_batch;
 static common_chat_templates_ptr          g_chat_templates;
 static common_sampler                   * g_sampler;
 
+// Controls whether the jinja chat template renders with thinking enabled.
+// Mirrors llama.cpp CLI "--reasoning off" by feeding enable_thinking into
+// common_chat_format_single. Defaults to true; the Kotlin side pushes the
+// desired value via setThinkingEnabled() before the first prompt.
+static bool g_thinking_enabled = true;
+
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_init(JNIEnv *env, jobject /*unused*/, jstring nativeLibDir) {
@@ -138,6 +144,13 @@ extern "C"
 JNIEXPORT jstring JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_systemInfo(JNIEnv *env, jobject /*unused*/) {
     return env->NewStringUTF(llama_print_system_info());
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_setThinkingEnabledNative(JNIEnv * /*env*/, jobject /*unused*/, jboolean enabled) {
+    g_thinking_enabled = enabled;
+    LOGi("%s: Thinking enabled set to: %d", __func__, (int) g_thinking_enabled);
 }
 
 extern "C"
@@ -290,8 +303,11 @@ static std::string chat_add_and_format(const std::string &role, const std::strin
     common_chat_msg new_msg;
     new_msg.role = role;
     new_msg.content = content;
+    // use_jinja=true so the template consumes g_thinking_enabled (the CLI
+    // "--reasoning off" equivalent). The legacy renderer ignores enable_thinking.
     auto formatted = common_chat_format_single(
-            g_chat_templates.get(), chat_msgs, new_msg, role == ROLE_USER, /* use_jinja */ false);
+            g_chat_templates.get(), chat_msgs, new_msg, role == ROLE_USER,
+            /* use_jinja */ true, g_thinking_enabled);
     chat_msgs.push_back(new_msg);
     LOGi("%s: Formatted and added %s message: \n%s\n", __func__, role.c_str(), formatted.c_str());
     return formatted;

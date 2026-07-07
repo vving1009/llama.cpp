@@ -15,6 +15,9 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.arm.aichat.AiChat
 import com.arm.aichat.InferenceEngine
+import com.arm.aichat.agent.AgentEvent
+import com.arm.aichat.agent.AgentLoop
+import com.arm.aichat.tool.ToolRegistry
 import com.arm.aichat.gguf.GgufMetadata
 import com.arm.aichat.gguf.GgufMetadataReader
 import com.google.android.material.floatingactionbutton.FloatingActionButton
@@ -38,6 +41,8 @@ class MainActivity : AppCompatActivity() {
 
     // Arm AI Chat inference engine
     private lateinit var engine: InferenceEngine
+    private lateinit var toolRegistry: ToolRegistry
+    private lateinit var agentLoop: AgentLoop
     private var generationJob: Job? = null
 
     // Conversation states
@@ -113,6 +118,12 @@ class MainActivity : AppCompatActivity() {
                 }?.let { modelFile ->
                     loadModel(modelName, modelFile)
 
+                    // Set up the Agent loop: system prompt is set here with tool descriptions
+                    toolRegistry = ToolRegistry(applicationContext)
+                    agentLoop = AgentLoop(engine, toolRegistry)
+                    // thinkingEnabled=false suppresses empty <thinking> tags from Qwen3 models
+                    agentLoop.initialize(thinkingEnabled = false)
+
                     withContext(Dispatchers.Main) {
                         isModelReady = true
                         userInputEt.hint = "Type and send a message!"
@@ -159,7 +170,7 @@ class MainActivity : AppCompatActivity() {
         }
 
     /**
-     * Validate and send the user message into [InferenceEngine]
+     * Validate and send the user message into [AgentLoop]
      */
     private fun handleUserInput() {
         userInputEt.text.toString().also { userMsg ->
@@ -170,30 +181,70 @@ class MainActivity : AppCompatActivity() {
                 userInputEt.isEnabled = false
                 userActionFab.isEnabled = false
 
-                // Update message states
-                messages.add(Message(UUID.randomUUID().toString(), userMsg, true))
+                // Update UI: add user message and a placeholder for the assistant reply
+                messages.add(Message(UUID.randomUUID().toString(), userMsg, MessageType.USER))
                 lastAssistantMsg.clear()
-                messages.add(Message(UUID.randomUUID().toString(), lastAssistantMsg.toString(), false))
+                messages.add(Message(UUID.randomUUID().toString(), "", MessageType.ASSISTANT))
+                messageAdapter.notifyItemRangeChanged(messages.size - 2, 2)
 
                 generationJob = lifecycleScope.launch(Dispatchers.Default) {
-                    engine.sendUserPrompt(userMsg)
-                        .onCompletion {
-                            withContext(Dispatchers.Main) {
-                                userInputEt.isEnabled = true
-                                userActionFab.isEnabled = true
-                            }
-                        }.collect { token ->
-                            withContext(Dispatchers.Main) {
-                                val messageCount = messages.size
-                                check(messageCount > 0 && !messages[messageCount - 1].isUser)
+                    agentLoop.sendUserMessage(userMsg).collect { event ->
+                        withContext(Dispatchers.Main) {
+                            when (event) {
+                                is AgentEvent.Generating -> {
+                                    // Stream tokens into the trailing assistant placeholder
+                                    val lastIdx = messages.size - 1
+                                    if (lastIdx >= 0 && messages[lastIdx].type == MessageType.ASSISTANT) {
+                                        lastAssistantMsg.append(event.token)
+                                        messages.removeAt(lastIdx)
+                                        messages.add(Message(UUID.randomUUID().toString(),
+                                            lastAssistantMsg.toString(), MessageType.ASSISTANT))
+                                        messageAdapter.notifyItemChanged(messages.size - 1)
+                                    }
+                                }
+                                is AgentEvent.ToolCallDetected -> {
+                                    // Keep the assistant placeholder (it holds the explanation text
+                                    // like "Let me read that file"), then add a clean tool-call bubble
+                                    // and a fresh placeholder for the next round.
+                                    val callText = "${event.toolName}(${event.params})"
+                                    messages.add(Message(UUID.randomUUID().toString(), callText, MessageType.TOOL_CALL))
+                                    messageAdapter.notifyItemInserted(messages.size - 1)
 
-                                messages.removeAt(messageCount - 1).copy(
-                                    content = lastAssistantMsg.append(token).toString()
-                                ).let { messages.add(it) }
-
-                                messageAdapter.notifyItemChanged(messages.size - 1)
+                                    lastAssistantMsg.clear()
+                                    messages.add(Message(UUID.randomUUID().toString(), "", MessageType.ASSISTANT))
+                                    messageAdapter.notifyItemInserted(messages.size - 1)
+                                }
+                                is AgentEvent.ToolResult -> {
+                                    val resultPreview = event.result.take(200)
+                                    // Insert BEFORE the trailing ASSISTANT placeholder, so ASSISTANT
+                                    // stays at the end for the next turn's Generating events.
+                                    val insertIdx = if (messages.lastOrNull()?.type == MessageType.ASSISTANT)
+                                        messages.size - 1
+                                    else
+                                        messages.size
+                                    messages.add(insertIdx, Message(UUID.randomUUID().toString(),
+                                        "${event.toolName}: $resultPreview", MessageType.TOOL_RESULT))
+                                    messageAdapter.notifyItemInserted(insertIdx)
+                                }
+                                is AgentEvent.AssistantMessage -> {
+                                    // Replace trailing assistant placeholder with the final message
+                                    val lastIdx = messages.size - 1
+                                    if (lastIdx >= 0 && messages[lastIdx].type == MessageType.ASSISTANT) {
+                                        messages.removeAt(lastIdx)
+                                        messages.add(Message(UUID.randomUUID().toString(),
+                                            event.message, MessageType.ASSISTANT))
+                                        messageAdapter.notifyItemChanged(messages.size - 1)
+                                    }
+                                }
+                                else -> {}
                             }
                         }
+                    }
+
+                    withContext(Dispatchers.Main) {
+                        userInputEt.isEnabled = true
+                        userActionFab.isEnabled = true
+                    }
                 }
             }
         }
@@ -215,7 +266,7 @@ class MainActivity : AppCompatActivity() {
                 pl=BENCH_SEQUENCE,
                 nr=BENCH_REPETITION
             ).let { result ->
-                messages.add(Message(UUID.randomUUID().toString(), result, false))
+                messages.add(Message(UUID.randomUUID().toString(), result, MessageType.ASSISTANT))
                 withContext(Dispatchers.Main) {
                     messageAdapter.notifyItemChanged(messages.size - 1)
                 }

@@ -98,6 +98,9 @@ internal class InferenceEngineImpl private constructor(
     private external fun processSystemPrompt(systemPrompt: String): Int
 
     @FastNative
+    private external fun setThinkingEnabledNative(enabled: Boolean)
+
+    @FastNative
     private external fun processUserPrompt(userPrompt: String, predictLength: Int): Int
 
     @FastNative
@@ -210,6 +213,18 @@ internal class InferenceEngineImpl private constructor(
             Log.i(TAG, "System prompt processed! Awaiting user prompt...")
             _state.value = InferenceEngine.State.ModelReady
         }
+
+    /**
+     * Push the thinking-enabled flag to native. Routed through [llamaDispatcher]
+     * so it stays on the single inference thread, consistent with every other
+     * native call.
+     */
+    override suspend fun setThinkingEnabled(enabled: Boolean) {
+        withContext(llamaDispatcher) {
+            setThinkingEnabledNative(enabled)
+            Log.i(TAG, "Thinking enabled = $enabled")
+        }
+    }
 
     /**
      * Send plain text user prompt to LLM, which starts generating tokens in a [Flow]
