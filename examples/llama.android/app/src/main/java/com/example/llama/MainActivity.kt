@@ -188,62 +188,97 @@ class MainActivity : AppCompatActivity() {
                 messageAdapter.notifyItemRangeChanged(messages.size - 2, 2)
 
                 generationJob = lifecycleScope.launch(Dispatchers.Default) {
-                    agentLoop.sendUserMessage(userMsg).collect { event ->
-                        withContext(Dispatchers.Main) {
-                            when (event) {
-                                is AgentEvent.Generating -> {
-                                    // Stream tokens into the trailing assistant placeholder
-                                    val lastIdx = messages.size - 1
-                                    if (lastIdx >= 0 && messages[lastIdx].type == MessageType.ASSISTANT) {
-                                        lastAssistantMsg.append(event.token)
-                                        messages.removeAt(lastIdx)
-                                        messages.add(Message(UUID.randomUUID().toString(),
-                                            lastAssistantMsg.toString(), MessageType.ASSISTANT))
-                                        messageAdapter.notifyItemChanged(messages.size - 1)
+                    try {
+                        agentLoop.sendUserMessage(userMsg).collect { event ->
+                            withContext(Dispatchers.Main) {
+                                when (event) {
+                                    is AgentEvent.Generating -> {
+                                        // Stream tokens into a trailing ASSISTANT bubble. After a
+                                        // tool round, no such bubble exists yet, so lazily create one.
+                                        val lastIdx = messages.size - 1
+                                        if (lastIdx >= 0 && messages[lastIdx].type == MessageType.ASSISTANT) {
+                                            lastAssistantMsg.append(event.token)
+                                            messages.removeAt(lastIdx)
+                                            messages.add(Message(UUID.randomUUID().toString(),
+                                                lastAssistantMsg.toString(), MessageType.ASSISTANT))
+                                            messageAdapter.notifyItemChanged(messages.size - 1)
+                                        } else {
+                                            // No trailing ASSISTANT (e.g. turn N>1 after a tool
+                                            // result); create a fresh bubble. lastAssistantMsg
+                                            // was cleared in the ToolCallDetected handler that
+                                            // started this turn.
+                                            lastAssistantMsg.append(event.token)
+                                            messages.add(Message(UUID.randomUUID().toString(),
+                                                lastAssistantMsg.toString(), MessageType.ASSISTANT))
+                                            messageAdapter.notifyItemInserted(messages.size - 1)
+                                        }
                                     }
-                                }
-                                is AgentEvent.ToolCallDetected -> {
-                                    // Keep the assistant placeholder (it holds the explanation text
-                                    // like "Let me read that file"), then add a clean tool-call bubble
-                                    // and a fresh placeholder for the next round.
-                                    val callText = "${event.toolName}(${event.params})"
-                                    messages.add(Message(UUID.randomUUID().toString(), callText, MessageType.TOOL_CALL))
-                                    messageAdapter.notifyItemInserted(messages.size - 1)
-
-                                    lastAssistantMsg.clear()
-                                    messages.add(Message(UUID.randomUUID().toString(), "", MessageType.ASSISTANT))
-                                    messageAdapter.notifyItemInserted(messages.size - 1)
-                                }
-                                is AgentEvent.ToolResult -> {
-                                    val resultPreview = event.result.take(200)
-                                    // Insert BEFORE the trailing ASSISTANT placeholder, so ASSISTANT
-                                    // stays at the end for the next turn's Generating events.
-                                    val insertIdx = if (messages.lastOrNull()?.type == MessageType.ASSISTANT)
-                                        messages.size - 1
-                                    else
-                                        messages.size
-                                    messages.add(insertIdx, Message(UUID.randomUUID().toString(),
-                                        "${event.toolName}: $resultPreview", MessageType.TOOL_RESULT))
-                                    messageAdapter.notifyItemInserted(insertIdx)
-                                }
-                                is AgentEvent.AssistantMessage -> {
-                                    // Replace trailing assistant placeholder with the final message
-                                    val lastIdx = messages.size - 1
-                                    if (lastIdx >= 0 && messages[lastIdx].type == MessageType.ASSISTANT) {
-                                        messages.removeAt(lastIdx)
-                                        messages.add(Message(UUID.randomUUID().toString(),
-                                            event.message, MessageType.ASSISTANT))
-                                        messageAdapter.notifyItemChanged(messages.size - 1)
+                                    is AgentEvent.ToolCallDetected -> {
+                                        // Reset the streaming buffer for the next turn. We
+                                        // deliberately do NOT pre-insert an empty ASSISTANT
+                                        // placeholder here: if the generation is cancelled
+                                        // before the next Generating event (e.g. CallPhoneTool
+                                        // surfaces the in-call screen and the activity hits
+                                        // onStop), a pre-inserted empty bubble would survive as
+                                        // an "air bubble". The Generating / AssistantMessage
+                                        // handlers lazily create the next bubble.
+                                        lastAssistantMsg.clear()
+                                        val callText = "${event.toolName}(${event.params})"
+                                        messages.add(Message(UUID.randomUUID().toString(), callText, MessageType.TOOL_CALL))
+                                        messageAdapter.notifyItemInserted(messages.size - 1)
                                     }
+                                    is AgentEvent.ToolResult -> {
+                                        val resultPreview = event.result.take(200)
+                                        // Insert before the trailing ASSISTANT bubble if there
+                                        // is one (turn 1), otherwise at the end (turn N>1 with
+                                        // no streaming yet).
+                                        val insertIdx = if (messages.lastOrNull()?.type == MessageType.ASSISTANT)
+                                            messages.size - 1
+                                        else
+                                            messages.size
+                                        messages.add(insertIdx, Message(UUID.randomUUID().toString(),
+                                            "${event.toolName}: $resultPreview", MessageType.TOOL_RESULT))
+                                        messageAdapter.notifyItemInserted(insertIdx)
+                                    }
+                                    is AgentEvent.AssistantMessage -> {
+                                        // Final assistant reply: replace the trailing streaming
+                                        // bubble, or append a new one if there is none (e.g.
+                                        // final turn after a tool result, when the model emitted
+                                        // no streaming tokens).
+                                        val lastIdx = messages.size - 1
+                                        if (lastIdx >= 0 && messages[lastIdx].type == MessageType.ASSISTANT) {
+                                            messages.removeAt(lastIdx)
+                                            messages.add(Message(UUID.randomUUID().toString(),
+                                                event.message, MessageType.ASSISTANT))
+                                            messageAdapter.notifyItemChanged(messages.size - 1)
+                                        } else {
+                                            messages.add(Message(UUID.randomUUID().toString(),
+                                                event.message, MessageType.ASSISTANT))
+                                            messageAdapter.notifyItemInserted(messages.size - 1)
+                                        }
+                                    }
+                                    else -> {}
                                 }
-                                else -> {}
                             }
                         }
-                    }
-
-                    withContext(Dispatchers.Main) {
-                        userInputEt.isEnabled = true
-                        userActionFab.isEnabled = true
+                    } finally {
+                        withContext(Dispatchers.Main) {
+                            // Sweep any trailing empty ASSISTANT bubble left by the pre-turn
+                            // placeholder and never filled (e.g. cancellation between turns).
+                            // This is the "air bubble" guard.
+                            val lastIdx = messages.size - 1
+                            if (lastIdx >= 0 && messages[lastIdx].type == MessageType.ASSISTANT
+                                && messages[lastIdx].content.isEmpty()) {
+                                messages.removeAt(lastIdx)
+                                messageAdapter.notifyItemRemoved(lastIdx)
+                            }
+                            // Always re-enable input, including on cancellation. Previously
+                            // this only ran after collect returned normally, so a cancelled
+                            // turn (e.g. CallPhoneTool surfacing the in-call screen) would
+                            // leave the user unable to type the next message.
+                            userInputEt.isEnabled = true
+                            userActionFab.isEnabled = true
+                        }
                     }
                 }
             }
@@ -283,7 +318,13 @@ class MainActivity : AppCompatActivity() {
         }
 
     override fun onStop() {
-        generationJob?.cancel()
+        // Intentionally NOT cancelling generationJob here. Tool calls such as
+        // CallPhoneTool surface system UI (the in-call screen) which briefly
+        // moves this Activity through onPause/onStop. Cancelling mid-turn in
+        // that case would (a) leave an empty ASSISTANT bubble on screen and
+        // (b) skip the input re-enable that lived outside the cancelled
+        // collect block, trapping the user. The job is bound to lifecycleScope
+        // and is cancelled automatically in onDestroy via the scope.
         super.onStop()
     }
 

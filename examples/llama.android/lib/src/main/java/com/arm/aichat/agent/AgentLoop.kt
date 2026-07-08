@@ -89,6 +89,18 @@ class AgentLoop(
                     emit(AgentEvent.ToolResult(toolCall.name, result))
                     Log.i(TAG, "Tool result (${toolCall.name}): ${result.take(50)}...")
 
+                    // Per-result follow-up decision: tools whose action is the
+                    // user-facing confirmation (e.g. call_phone on success)
+                    // return false from requiresFollowUp() and we skip the
+                    // second LLM turn that would otherwise produce a redundant
+                    // summary. On error the tool returns true so the LLM can
+                    // explain the failure in natural language.
+                    val tool = toolRegistry.get(toolCall.name)
+                    if (tool != null && !tool.requiresFollowUp(result)) {
+                        Log.i(TAG, "Tool ${toolCall.name} does not need a follow-up turn, ending chat")
+                        break
+                    }
+
                     // 下一轮发送 tool result，让模型总结结果
                     currentPrompt = buildToolResultPrompt(toolCall.name, result)
                     // Continue loop
@@ -142,6 +154,10 @@ class AgentLoop(
             appendLine("   <tool_call>{\"name\":\"read_file\",\"params\":{\"file_path\":\"test.txt\"}}</tool_call>")
             appendLine("   让我列出目录内容。")
             appendLine("   <tool_call>{\"name\":\"list_files\",\"params\":{\"base_path\":\"/tmp\"}}</tool_call>")
+            appendLine("   我来帮你拨打张三的电话。")
+            appendLine("   <tool_call>{\"name\":\"call_phone\",\"params\":{\"contact_name\":\"张三\"}}</tool_call>")
+            appendLine("   让我拨打 +8613800138000。")
+            appendLine("   <tool_call>{\"name\":\"call_phone\",\"params\":{\"phone_number\":\"+8613800138000\"}}</tool_call>")
             appendLine()
             appendLine("3. Tool results will be sent back to you automatically. The format will be:")
             appendLine("   The tool 'X' returned this result:")

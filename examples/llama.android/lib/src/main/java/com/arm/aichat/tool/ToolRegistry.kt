@@ -16,6 +16,7 @@ class ToolRegistry(context: Context) {
         register(WriteFileTool(context))
         register(ListFilesTool(context))
         register(RunShellTool(context))
+        register(CallPhoneTool(context))
     }
 
     fun register(tool: Tool) {
