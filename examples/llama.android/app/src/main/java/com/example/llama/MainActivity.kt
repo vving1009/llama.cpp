@@ -17,6 +17,8 @@ import com.arm.aichat.AiChat
 import com.arm.aichat.InferenceEngine
 import com.arm.aichat.agent.AgentEvent
 import com.arm.aichat.agent.AgentLoop
+import com.arm.aichat.skill.InvokeSkillTool
+import com.arm.aichat.skill.SkillRegistry
 import com.arm.aichat.tool.ToolRegistry
 import com.arm.aichat.gguf.GgufMetadata
 import com.arm.aichat.gguf.GgufMetadataReader
@@ -42,6 +44,7 @@ class MainActivity : AppCompatActivity() {
     // Arm AI Chat inference engine
     private lateinit var engine: InferenceEngine
     private lateinit var toolRegistry: ToolRegistry
+    private lateinit var skillRegistry: SkillRegistry
     private lateinit var agentLoop: AgentLoop
     private var generationJob: Job? = null
 
@@ -120,7 +123,9 @@ class MainActivity : AppCompatActivity() {
 
                     // Set up the Agent loop: system prompt is set here with tool descriptions
                     toolRegistry = ToolRegistry(applicationContext)
-                    agentLoop = AgentLoop(engine, toolRegistry)
+                    skillRegistry = SkillRegistry(applicationContext)
+                    toolRegistry.register(InvokeSkillTool(skillRegistry))
+                    agentLoop = AgentLoop(engine, toolRegistry, skillRegistry)
                     // thinkingEnabled=false suppresses empty <thinking> tags from Qwen3 models
                     agentLoop.initialize(thinkingEnabled = false)
 
@@ -173,21 +178,39 @@ class MainActivity : AppCompatActivity() {
      * Validate and send the user message into [AgentLoop]
      */
     private fun handleUserInput() {
-        userInputEt.text.toString().also { userMsg ->
-            if (userMsg.isEmpty()) {
-                Toast.makeText(this, "Input message is empty!", Toast.LENGTH_SHORT).show()
-            } else {
-                userInputEt.text = null
-                userInputEt.isEnabled = false
-                userActionFab.isEnabled = false
+        var userMsg = userInputEt.text.toString()
+        if (userMsg.isEmpty()) {
+            Toast.makeText(this, "Input message is empty!", Toast.LENGTH_SHORT).show()
+            return
+        }
 
-                // Update UI: add user message and a placeholder for the assistant reply
-                messages.add(Message(UUID.randomUUID().toString(), userMsg, MessageType.USER))
-                lastAssistantMsg.clear()
-                messages.add(Message(UUID.randomUUID().toString(), "", MessageType.ASSISTANT))
-                messageAdapter.notifyItemRangeChanged(messages.size - 2, 2)
+        // Handle slash commands (skill invocation)
+        if (userMsg.startsWith("/")) {
+            val spaceIdx = userMsg.indexOf(' ')
+            val cmdName = if (spaceIdx > 0) userMsg.substring(1, spaceIdx) else userMsg.substring(1)
+            val cmdArgs = if (spaceIdx > 0) userMsg.substring(spaceIdx + 1) else ""
 
-                generationJob = lifecycleScope.launch(Dispatchers.Default) {
+            val skill = skillRegistry.getByName(cmdName)
+            if (skill != null && skill.userInvocable) {
+                val resolved = skillRegistry.resolvePrompt(skill, cmdArgs)
+                Toast.makeText(this, "Invoking skill: ${skill.name}", Toast.LENGTH_SHORT).show()
+                Log.i(TAG, "Skill invoked: /${skill.name} args='$cmdArgs'")
+                userMsg = resolved
+            }
+            // If skill not found, fall through — let the LLM handle it
+        }
+
+        userInputEt.text = null
+        userInputEt.isEnabled = false
+        userActionFab.isEnabled = false
+
+        // Update UI: add user message and a placeholder for the assistant reply
+        messages.add(Message(UUID.randomUUID().toString(), userMsg, MessageType.USER))
+        lastAssistantMsg.clear()
+        messages.add(Message(UUID.randomUUID().toString(), "", MessageType.ASSISTANT))
+        messageAdapter.notifyItemRangeChanged(messages.size - 2, 2)
+
+        generationJob = lifecycleScope.launch(Dispatchers.Default) {
                     try {
                         agentLoop.sendUserMessage(userMsg).collect { event ->
                             withContext(Dispatchers.Main) {
@@ -291,8 +314,6 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 }
-            }
-        }
     }
 
     /**

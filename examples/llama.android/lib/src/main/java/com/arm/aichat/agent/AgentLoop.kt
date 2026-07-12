@@ -2,6 +2,7 @@ package com.arm.aichat.agent
 
 import android.util.Log
 import com.arm.aichat.InferenceEngine
+import com.arm.aichat.skill.SkillRegistry
 import com.arm.aichat.tool.*
 import kotlinx.coroutines.flow.*
 
@@ -13,7 +14,8 @@ import kotlinx.coroutines.flow.*
  */
 class AgentLoop(
     private val inferenceEngine: InferenceEngine,
-    private val toolRegistry: ToolRegistry
+    private val toolRegistry: ToolRegistry,
+    private val skillRegistry: SkillRegistry
 ) {
 
     companion object {
@@ -36,10 +38,14 @@ class AgentLoop(
         // Push the flag to native BEFORE the system prompt is formatted, so the
         // jinja template renders without the thinking block (--reasoning off).
         inferenceEngine.setThinkingEnabled(thinkingEnabled)
+
+        // Initialize skills (discover from filesDir and assets)
+        skillRegistry.initialize()
+
         val systemPrompt = buildSystemPrompt()
         inferenceEngine.setSystemPrompt(systemPrompt)
         isInitialized = true
-        Log.i(TAG, "AgentLoop initialized (thinkingEnabled=$thinkingEnabled)")
+        Log.i(TAG, "AgentLoop initialized (thinkingEnabled=$thinkingEnabled, skills=${skillRegistry.getAll().size})")
     }
 
     /**
@@ -150,6 +156,12 @@ class AgentLoop(
             appendLine()
             appendLine(toolRegistry.buildToolDescriptions())
             appendLine()
+            // Append skill descriptions
+            val skillDesc = skillRegistry.buildSkillDescriptions()
+            if (skillDesc.isNotEmpty()) {
+                appendLine(skillDesc)
+                appendLine()
+            }
             appendLine("## 规则 Rules (IMPORTANT — follow strictly)")
             appendLine("1. Analyze the user's request. If the user speaks Chinese, respond in Chinese.")
             appendLine()
@@ -163,6 +175,8 @@ class AgentLoop(
             appendLine("   <tool_call>{\"name\":\"call_phone\",\"params\":{\"contact_name\":\"张三\"}}</tool_call>")
             appendLine("   让我拨打 +8613800138000。")
             appendLine("   <tool_call>{\"name\":\"call_phone\",\"params\":{\"phone_number\":\"+8613800138000\"}}</tool_call>")
+            appendLine("   我来使用翻译技能。")
+            appendLine("   <tool_call>{\"name\":\"invoke_skill\",\"params\":{\"skill_name\":\"translate\",\"args\":\"Hello world\"}}</tool_call>")
             appendLine()
             appendLine("3. Tool results will be sent back to you automatically. The format will be:")
             appendLine("   The tool 'X' returned this result:")
