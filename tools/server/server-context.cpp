@@ -1444,6 +1444,7 @@ private:
         // populate chat template params
         {
             common_chat_templates_ptr chat_templates;
+            bool enable_thinking = false;
 
             try {
                 chat_templates = common_chat_templates_init(model_tgt, params_base.chat_template);
@@ -1451,19 +1452,18 @@ private:
                 SRV_TRC("%s: chat template, example_format: '%s'\n", __func__,
                     common_chat_format_example(chat_templates.get(), params_base.use_jinja, params_base.default_template_kwargs).c_str());
 
+                // thinking is enabled if:
+                // 1. It's not explicitly disabled via --reasoning off
+                // 2. The chat template supports it
+                const bool template_supports_thinking = params_base.use_jinja && common_chat_templates_support_enable_thinking(chat_templates.get());
+                enable_thinking = params_base.enable_reasoning != 0 && template_supports_thinking;
+                SRV_TRC("%s: chat template, thinking = %d\n", __func__, enable_thinking);
             } catch (const std::exception & e) {
                 SRV_ERR("%s: chat template parsing error: %s\n", __func__, e.what());
                 SRV_ERR("%s: please consider disabling jinja via --no-jinja, or use a custom chat template via --chat-template\n", __func__);
                 SRV_ERR("%s: for example: --no-jinja --chat-template chatml\n", __func__);
                 return false;
             }
-
-            // thinking is enabled if:
-            // 1. It's not explicitly disabled via --reasoning off
-            // 2. The chat template supports it
-            const bool template_supports_thinking = params_base.use_jinja && common_chat_templates_support_enable_thinking(chat_templates.get());
-            const bool enable_thinking = params_base.enable_reasoning != 0 && template_supports_thinking;
-            SRV_TRC("%s: chat template, thinking = %d\n", __func__, enable_thinking);
 
             // IMPORTANT: chat_params is reused across sleeping / resuming states,
             //            never store llama_context/llama_model pointers in chat_params,
@@ -3979,11 +3979,9 @@ server_context_meta server_context::get_meta() const {
     };
 }
 
-
-
 // generator-like API for HTTP response generation
 // may have bypass_sleep = true if the task does not use ctx_server
-struct server_res_generator : server_http_res {
+struct server_res_generator : server_res_spipe {
     server_response_reader rd;
     server_res_generator(server_queue & queue_tasks, server_response & queue_results, int sleep_idle_seconds, bool bypass_sleep = false)
             : rd(queue_tasks, queue_results, HTTP_POLLING_SECONDS) {
@@ -3992,15 +3990,6 @@ struct server_res_generator : server_http_res {
         if (!bypass_sleep) {
             queue_tasks.wait_until_no_sleep();
         }
-    }
-    ~server_res_generator() override {
-        // cleanup() must run while rd is still alive (rd is destroyed after this body returns)
-        if (spipe) {
-            spipe->cleanup();
-        }
-    }
-    void stop() override {
-        rd.stop();
     }
     void ok(const json & response_data) {
         status = 200;
@@ -4038,6 +4027,8 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
     auto completion_id = gen_chatcmplid();
     auto & rd = res->rd;
     auto & params = this->params;
+
+    res->set_req(&req); // will also set spipe if needed
 
     int32_t sse_ping_interval = params.sse_ping_interval;
 
@@ -4181,7 +4172,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         }
         res->status = 200;
         res->content_type = "text/event-stream";
-        res->next = [res_this = res.get(), res_type, sse_ping_interval, &req](std::string & output) -> bool {
+        res->set_next([res_this = res.get(), res_type, sse_ping_interval](std::string & output) -> bool {
             static auto format_error = [](task_response_type res_type, const json & res_json) {
                 if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
                     return format_anthropic_sse({
@@ -4193,7 +4184,9 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                 }
             };
 
-            auto effective_should_stop = server_stream_aware_should_stop(res_this, req.should_stop);
+            auto effective_should_stop = [&res_this]() {
+                return res_this->should_stop();
+            };
 
             try {
                 if (effective_should_stop()) {
@@ -4284,12 +4277,8 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                 // terminate on exception
                 return false;
             }
-        };
+        });
     }
-
-    // attach a producer pipe to the response when X-Conversation-Id is present.
-    // the pipe mirrors SSE chunks into the ring buffer and wires up the cancel hook.
-    server_stream_session_attach_pipe(*res, req.headers);
 
     return res;
 }
