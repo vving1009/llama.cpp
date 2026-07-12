@@ -5,16 +5,17 @@ import java.io.File
 import java.io.IOException
 
 /**
- * 读取文件工具
- * 安全限制：只能访问应用沙箱内文件
+ * 删除文件工具
+ * 只能删除应用沙箱内的文件或目录（外部文件目录和缓存目录）
+ * 删除目录时会递归删除整个目录树
  */
-class ReadFileTool(private val context: Context) : Tool {
+class DeleteFileTool(private val context: Context) : Tool {
 
     override val definition = ToolDefinition(
-        name = "read_file",
-        description = "Read the contents of a file. Returns the file content with line numbers. Only accesses files within the app's sandbox.",
+        name = "delete_file",
+        description = "Delete a file or directory. Permanently removes the file/folder from the app's sandbox. Directories are deleted recursively with all contents.",
         parameters = listOf(
-            ToolParameter("file_path", "string", "The path to the file to read")
+            ToolParameter("file_path", "string", "The path to the file or directory to delete")
         )
     )
 
@@ -26,35 +27,33 @@ class ReadFileTool(private val context: Context) : Tool {
 
             // 安全检查：确保文件在允许范围内
             if (!isPathAllowed(file)) {
-                return "Error: Access denied. Can only read files within the app's sandbox."
+                return "Error: Access denied. Can only delete files within the app's sandbox."
             }
 
             if (!file.exists()) {
                 return "Error: File does not exist: ${file.absolutePath}"
             }
 
-            if (!file.isFile) {
-                return "Error: Path is not a file: ${file.absolutePath}"
+            val type = if (file.isDirectory) "directory" else "file"
+
+            val deleted = if (file.isDirectory) {
+                file.deleteRecursively()
+            } else {
+                file.delete()
+            }
+            if (deleted) {
+                "Successfully deleted $type: ${file.absolutePath}"
+            } else {
+                "Error: Failed to delete $type: ${file.absolutePath}"
             }
 
-            // 添加行号输出（与 Python 版一致）
-            val content = file.readText()
-            val lines = content.lines()
-            val maxLineNumWidth = lines.size.toString().length
-
-            lines.mapIndexed { index, line ->
-                val lineNum = (index + 1).toString().padStart(maxLineNumWidth, ' ')
-                "$lineNum | $line"
-            }.joinToString("\n")
-
         } catch (e: IOException) {
-            "Error reading file: ${e.message}"
+            "Error deleting file: ${e.message}"
+        } catch (e: SecurityException) {
+            "Error: Permission denied: ${e.message}"
         }
     }
 
-    /**
-     * 解析路径：支持相对路径和绝对路径
-     */
     private fun resolvePath(path: String): File {
         return if (path.startsWith("/")) {
             File(path)
@@ -63,16 +62,12 @@ class ReadFileTool(private val context: Context) : Tool {
         }
     }
 
-    /**
-     * 安全检查：只允许访问应用沙箱内文件
-     */
     private fun isPathAllowed(file: File): Boolean {
         val canonicalPath = file.canonicalPath
         val allowedRoots = listOf(
             context.externalCacheDir!!.canonicalPath,
             context.cacheDir.canonicalPath
         )
-
         return allowedRoots.any { canonicalPath.startsWith(it) }
     }
 }

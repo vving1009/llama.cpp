@@ -15,6 +15,7 @@ class ToolRegistry(context: Context) {
         register(ReadFileTool(context))
         register(WriteFileTool(context))
         register(ListFilesTool(context))
+        register(DeleteFileTool(context))
         register(RunShellTool(context))
         register(CallPhoneTool(context))
     }
@@ -33,7 +34,8 @@ class ToolRegistry(context: Context) {
      * 执行工具
      */
     suspend fun execute(name: String, params: Map<String, String>): String {
-        val tool = tools[name] ?: return "Error: Unknown tool '$name'. Available tools: ${tools.keys.joinToString(", ")}"
+        val tool = tools[name]
+            ?: return "Error: Unknown tool '$name'. Available tools: ${tools.keys.joinToString(", ")}"
         return tool.execute(params)
     }
 

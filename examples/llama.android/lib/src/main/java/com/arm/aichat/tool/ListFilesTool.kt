@@ -12,8 +12,17 @@ class ListFilesTool(private val context: Context) : Tool {
         name = "list_files",
         description = "List files matching a glob pattern. Returns matching file paths.",
         parameters = listOf(
-            ToolParameter("pattern", "string", "Glob pattern to match files (e.g., '*.txt', 'src/**/*')"),
-            ToolParameter("path", "string", "Base directory to search from. Defaults to current directory.", required = false)
+            ToolParameter(
+                "pattern",
+                "string",
+                "Glob pattern to match files (e.g., '*.txt', 'src/**/*')"
+            ),
+            ToolParameter(
+                "path",
+                "string",
+                "Base directory to search from. Defaults to current directory.",
+                required = false
+            )
         )
     )
 
@@ -25,7 +34,7 @@ class ListFilesTool(private val context: Context) : Tool {
             val dir = if (basePath.startsWith("/")) {
                 File(basePath)
             } else {
-                File(context.filesDir, basePath)
+                File(context.externalCacheDir!!, basePath)
             }
 
             if (!dir.exists() || !dir.isDirectory) {
@@ -96,7 +105,7 @@ class ListFilesTool(private val context: Context) : Tool {
     private fun isPathAllowed(file: File): Boolean {
         val canonicalPath = file.canonicalPath
         val allowedRoots = listOf(
-            context.filesDir.canonicalPath,
+            context.externalCacheDir!!.canonicalPath,
             context.cacheDir.canonicalPath
         )
         return allowedRoots.any { canonicalPath.startsWith(it) }

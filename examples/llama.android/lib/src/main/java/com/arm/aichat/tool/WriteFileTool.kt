@@ -46,14 +46,14 @@ class WriteFileTool(private val context: Context) : Tool {
         return if (path.startsWith("/")) {
             File(path)
         } else {
-            File(context.filesDir, path)
+            File(context.externalCacheDir!!, path)
         }
     }
 
     private fun isPathAllowed(file: File): Boolean {
         val canonicalPath = file.canonicalPath
         val allowedRoots = listOf(
-            context.filesDir.canonicalPath,
+            context.externalCacheDir!!.canonicalPath,
             context.cacheDir.canonicalPath
         )
         return allowedRoots.any { canonicalPath.startsWith(it) }
