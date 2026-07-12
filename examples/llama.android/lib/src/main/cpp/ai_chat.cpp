@@ -11,6 +11,17 @@
 #include "common.h"
 #include "llama.h"
 
+// Local mirror of common_chat_format_single with __android_log_print DIAG.
+// Defined in chat_format_local.cpp (added to the shared library alongside
+// this .cpp). The forward declaration is here instead of a header because
+// the TU has only one consumer.
+std::string chat_format_local(const struct common_chat_templates * tmpls,
+                              const std::vector<common_chat_msg>    & past_msg,
+                              const common_chat_msg                 & new_msg,
+                              bool                                    add_ass,
+                              bool                                    use_jinja,
+                              bool                                    enable_thinking);
+
 template<class T>
 static std::string join(const std::vector<T> &values, const std::string &delim) {
     std::ostringstream str;
@@ -151,6 +162,20 @@ JNIEXPORT void JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_setThinkingEnabledNative(JNIEnv * /*env*/, jobject /*unused*/, jboolean enabled) {
     g_thinking_enabled = enabled;
     LOGi("%s: Thinking enabled set to: %d", __func__, (int) g_thinking_enabled);
+}
+
+// Forward-declared in chat_format_local.cpp; stores the diag dump directory
+// so chat_format_local can write fmt_past / fmt_new files directly to the
+// app's cache directory without platform-specific path assumptions.
+extern "C" void set_log_dump_dir(const std::string &path);
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_setLogDumpDir(JNIEnv *env, jobject /*unused*/, jstring jpath) {
+    const char *path = env->GetStringUTFChars(jpath, nullptr);
+    set_log_dump_dir(std::string(path));
+    env->ReleaseStringUTFChars(jpath, path);
+    LOGi("%s: fmt dump dir set to '%s'", __func__, path);
 }
 
 extern "C"
@@ -303,13 +328,50 @@ static std::string chat_add_and_format(const std::string &role, const std::strin
     common_chat_msg new_msg;
     new_msg.role = role;
     new_msg.content = content;
+//    LOGi("%s: ENTER role=%s past_size=%zu content_len=%zu content='%s'",
+//         __func__, role.c_str(), chat_msgs.size(), content.size(), content.c_str());
     // use_jinja=true so the template consumes g_thinking_enabled (the CLI
     // "--reasoning off" equivalent). The legacy renderer ignores enable_thinking.
-    auto formatted = common_chat_format_single(
+    auto formatted = chat_format_local(
             g_chat_templates.get(), chat_msgs, new_msg, role == ROLE_USER,
             /* use_jinja */ true, g_thinking_enabled);
+//    LOGi("%s: EXIT role=%s formatted_len=%zu head='%s' tail='%s'",
+//         __func__, role.c_str(), formatted.size(), formatted.substr(0, 60).c_str(),
+//         formatted.size() > 60 ? formatted.substr(formatted.size() - 60).c_str() : "");
     chat_msgs.push_back(new_msg);
     LOGi("%s: Formatted and added %s message: \n%s\n", __func__, role.c_str(), formatted.c_str());
+//    {
+//        // Hex dump of the first 40 bytes — diagnostic for multi-byte / newline
+//        // truncation in the above %s log, which under android_log_print can drop
+//        // leading whitespace or split on \n boundaries and look like characters
+//        // are missing when they're really just rendered funky in logcat.
+//        char hex[160];
+//        const size_t dump_n = std::min<size_t>(formatted.size(), 40);
+//        for (size_t i = 0; i < dump_n; i++) {
+//            sprintf(hex + i * 3, "%02x ", (unsigned char) formatted[i]);
+//        }
+//        hex[dump_n * 3] = '\0';
+//        LOGi("%s: DUMP[%zu] head40='%s'", __func__, formatted.size(), hex);
+//    }
+//    {
+//        // Dump the last few messages held in chat_msgs so we can confirm whether
+//        // the raw K/V pairs arriving from Kotlin are intact (the missing prefix
+//        // bytes in `formatted` would not have come from here, but confirm). Only
+//        // emit when chat_msgs has reached the multi-turn size we care about.
+//        if (chat_msgs.size() >= 3) {
+//            for (size_t i = 0; i < chat_msgs.size(); i++) {
+//                const auto &m  = chat_msgs[i];
+//                char head_hex[64];
+//                const size_t n = std::min<size_t>(m.content.size(), 20);
+//                for (size_t k = 0; k < n; k++) {
+//                    sprintf(head_hex + k * 3, "%02x ", (unsigned char) m.content[k]);
+//                }
+//                head_hex[n * 3] = '\0';
+//                LOGi("%s: CHAT_MSGS[%zu] role=%s content_len=%zu head20='%s'",
+//                     __func__, i, m.role.c_str(), m.content.size(), head_hex);
+//            }
+//        }
+//    }
     return formatted;
 }
 

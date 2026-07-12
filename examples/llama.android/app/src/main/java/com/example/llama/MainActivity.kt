@@ -196,6 +196,8 @@ class MainActivity : AppCompatActivity() {
                                         // Stream tokens into a trailing ASSISTANT bubble. After a
                                         // tool round, no such bubble exists yet, so lazily create one.
                                         val lastIdx = messages.size - 1
+                                        val tailType = messages.lastOrNull()?.type?.toString() ?: "NONE"
+                                        Log.d(TAG, "[trace] EVT Generating tailIdx=$lastIdx tailType=$tailType token='${event.token.take(20)}' msgCount=${messages.size}")
                                         if (lastIdx >= 0 && messages[lastIdx].type == MessageType.ASSISTANT) {
                                             lastAssistantMsg.append(event.token)
                                             messages.removeAt(lastIdx)
@@ -222,16 +224,21 @@ class MainActivity : AppCompatActivity() {
                                         // onStop), a pre-inserted empty bubble would survive as
                                         // an "air bubble". The Generating / AssistantMessage
                                         // handlers lazily create the next bubble.
+                                        val tailType = messages.lastOrNull()?.type?.toString() ?: "NONE"
+                                        Log.d(TAG, "[trace] EVT ToolCallDetected tool=${event.toolName} tailType=$tailType tailContent='${messages.lastOrNull()?.content?.take(40)}' msgCount=${messages.size}")
                                         lastAssistantMsg.clear()
                                         val callText = "${event.toolName}(${event.params})"
                                         messages.add(Message(UUID.randomUUID().toString(), callText, MessageType.TOOL_CALL))
                                         messageAdapter.notifyItemInserted(messages.size - 1)
+                                        Log.d(TAG, "[trace] AFTER ToolCallDetected tail=${messages.lastOrNull()?.type} msgCount=${messages.size}")
                                     }
                                     is AgentEvent.ToolResult -> {
                                         val resultPreview = event.result.take(200)
                                         // Insert before the trailing ASSISTANT bubble if there
                                         // is one (turn 1), otherwise at the end (turn N>1 with
                                         // no streaming yet).
+                                        val tailType = messages.lastOrNull()?.type?.toString() ?: "NONE"
+                                        Log.d(TAG, "[trace] EVT ToolResult tool=${event.toolName} tailBeforeInsertType=$tailType tailContent='${messages.lastOrNull()?.content?.take(40)}' msgCount=${messages.size}")
                                         val insertIdx = if (messages.lastOrNull()?.type == MessageType.ASSISTANT)
                                             messages.size - 1
                                         else
@@ -239,8 +246,10 @@ class MainActivity : AppCompatActivity() {
                                         messages.add(insertIdx, Message(UUID.randomUUID().toString(),
                                             "${event.toolName}: $resultPreview", MessageType.TOOL_RESULT))
                                         messageAdapter.notifyItemInserted(insertIdx)
+                                        Log.d(TAG, "[trace] AFTER ToolResult insertIdx=$insertIdx newTailType=${messages.lastOrNull()?.type} msgCount=${messages.size}")
                                     }
                                     is AgentEvent.AssistantMessage -> {
+                                        Log.d(TAG, "[trace] EVT AssistantMessage len=${event.message.length} content='${event.message.take(60)}' msgCount=${messages.size}")
                                         // Final assistant reply: replace the trailing streaming
                                         // bubble, or append a new one if there is none (e.g.
                                         // final turn after a tool result, when the model emitted
@@ -256,6 +265,7 @@ class MainActivity : AppCompatActivity() {
                                                 event.message, MessageType.ASSISTANT))
                                             messageAdapter.notifyItemInserted(messages.size - 1)
                                         }
+                                        Log.d(TAG, "[trace] AFTER AssistantMessage newTailType=${messages.lastOrNull()?.type} tailContent='${messages.lastOrNull()?.content?.take(40)}' msgCount=${messages.size}")
                                     }
                                     else -> {}
                                 }

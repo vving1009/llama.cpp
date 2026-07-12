@@ -74,13 +74,18 @@ class AgentLoop(
             if (ToolCallParser.hasToolCall(responseText)) {
                 // 将 <tool_call> 之前的文本（前言说明）单独作为 AssistantMessage 发出
                 val preamble = responseText.substringBefore("<tool_call>").trim()
+//                Log.d(TAG, "[trace] preamble='${preamble.take(60)}' hasToolCall=true responseLen=${responseText.length}")
                 if (preamble.isNotEmpty()) {
+//                    Log.d(TAG, "[trace] EMIT AssistantMessage(preamble) len=${preamble.length}")
                     emit(AgentEvent.AssistantMessage(preamble))
+                } else {
+//                    Log.d(TAG, "[trace] preamble EMPTY before <tool_call>")
                 }
 
                 val toolCall = ToolCallParser.parse(responseText)
 
                 if (toolCall != null) {
+//                    Log.d(TAG, "[trace] EMIT ToolCallDetected name=${toolCall.name}")
                     emit(AgentEvent.ToolCallDetected(toolCall.name, toolCall.params))
                     Log.i(TAG, "Tool call: ${toolCall.name}(${toolCall.params})")
 

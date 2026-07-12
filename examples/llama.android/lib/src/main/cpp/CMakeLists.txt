@@ -34,7 +34,8 @@ set(LLAMA_SRC ${CMAKE_CURRENT_LIST_DIR}/../../../../../../)
 add_subdirectory(${LLAMA_SRC} build-llama)
 
 add_library(${CMAKE_PROJECT_NAME} SHARED
-        ai_chat.cpp)
+        ai_chat.cpp
+        chat_format_local.cpp)
 
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
         GGML_SYSTEM_ARCH=${GGML_SYSTEM_ARCH}

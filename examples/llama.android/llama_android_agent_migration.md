@@ -495,3 +495,367 @@ MainActivity.kt 传 thinkingEnabled=false
             → Jinja 模板收到 enable_thinking=False
             → 模板不渲染 <thinking> 块 ✓
 ```
+
+---
+
+## 2026-07-08 更新：CallPhoneTool 触发的三处问题
+
+### 背景
+
+线上测试 `call_phone` 工具时连续发现三处问题,围绕"通话行为 + 通话后 UI 状态"展开,横跨 `:lib` 和 `:app` 两个模块。
+
+### 问题 1：通话后界面卡死 — 空气泡 + 输入框锁定
+
+#### 现象
+
+用户调 `call_phone` 后:
+- 消息列表末尾出现一个**完全空白**的 assistant 泡(下文称"空气泡")
+- 输入框和发送按钮一直 `disable`,无法再发新消息
+
+#### 根因链路
+
+```
+1. CallPhoneTool.execute() 调用 Intent.ACTION_CALL
+2. 系统通话界面抢焦,Activity 进入 onPause/onStop
+3. MainActivity.onStop() 里有 generationJob?.cancel()
+4. 正在 collect turn-2 的 flow 被 CancellationException 中断
+5. AgentLoop.sendUserMessage() 末尾的 .catch {} 不会捕获 CancellationException
+   (Kotlin 协程惯例),所以 AgentEvent.Completed 永远不发
+6. MainActivity 的 launch { collect { ... } } 在 collect 之后才执行
+   userInputEt.isEnabled = true 这一行,collect 被取消后这行永远跑不到
+7. ToolCallDetected 分支预先在消息列表末尾插了一个空 ASSISTANT 占位泡,
+   如果 turn-2 没机会发出 Generating/AssistantMessage,这个泡就永远空着
+```
+
+日志佐证:
+
+```
+22:43:35.916  SettingTrigger : unregister status observer com.example.llama.MainActivity
+22:43:35.917  SettingTrigger : unregisterUIAgentListener com.example.llama.MainActivity
+22:43:36.033  ai-chat  chat_add_and_format: Formatted and added user message ... <- turn-2 格式化完成
+                                                              <- 此后没有任何 User prompt processed / Assistant generation complete
+```
+
+`chat_add_and_format` 完成后 collect 还没消费到下一个 event 就被取消了。
+
+#### 改动 — `app/src/main/java/com/example/llama/MainActivity.kt`
+
+**a)** `onStop()` 移除 `generationJob?.cancel()`
+
+```kotlin
+override fun onStop() {
+    // Intentionally NOT cancelling generationJob here. Tool calls such as
+    // CallPhoneTool surface system UI (the in-call screen) which briefly
+    // moves this Activity through onPause/onStop. Cancelling mid-turn in
+    // that case would (a) leave an empty ASSISTANT bubble on screen and
+    // (b) skip the input re-enable that lived outside the cancelled
+    // collect block, trapping the user. The job is bound to lifecycleScope
+    // and is cancelled automatically in onDestroy via the scope.
+    super.onStop()
+}
+```
+
+**b)** `collect` 用 `try { ... } finally { ... }` 包裹,`finally` 里强制解锁输入并清理空泡
+
+```kotlin
+generationJob = lifecycleScope.launch(Dispatchers.Default) {
+    try {
+        agentLoop.sendUserMessage(userMsg).collect { event ->
+            withContext(Dispatchers.Main) { /* when 分支 */ }
+        }
+    } finally {
+        withContext(Dispatchers.Main) {
+            val lastIdx = messages.size - 1
+            if (lastIdx >= 0 && messages[lastIdx].type == MessageType.ASSISTANT
+                && messages[lastIdx].content.isEmpty()) {
+                messages.removeAt(lastIdx)
+                messageAdapter.notifyItemRemoved(lastIdx)
+            }
+            userInputEt.isEnabled = true
+            userActionFab.isEnabled = true
+        }
+    }
+}
+```
+
+**c)** `ToolCallDetected` 不再预先在消息列表末尾插空 ASSISTANT 占位泡。改为由 `Generating` / `AssistantMessage` handler 在第一个 token 或最终回复时**懒创建**。
+
+```kotlin
+is AgentEvent.ToolCallDetected -> {
+    // Reset the streaming buffer for the next turn. We deliberately do
+    // NOT pre-insert an empty ASSISTANT placeholder here.
+    lastAssistantMsg.clear()
+    val callText = "${event.toolName}(${event.params})"
+    messages.add(Message(UUID.randomUUID().toString(), callText, MessageType.TOOL_CALL))
+    messageAdapter.notifyItemInserted(messages.size - 1)
+}
+```
+
+**d)** `Generating` 和 `AssistantMessage` handler 都要处理"末尾无 ASSISTANT 泡"的情况:
+
+```kotlin
+is AgentEvent.Generating -> {
+    val lastIdx = messages.size - 1
+    if (lastIdx >= 0 && messages[lastIdx].type == MessageType.ASSISTANT) {
+        // 已有占位泡 -> 追加 token
+        lastAssistantMsg.append(event.token)
+        messages.removeAt(lastIdx)
+        messages.add(Message(UUID.randomUUID().toString(),
+            lastAssistantMsg.toString(), MessageType.ASSISTANT))
+        messageAdapter.notifyItemChanged(messages.size - 1)
+    } else {
+        // 没有占位泡(turn N>1 工具轮后) -> 新建
+        lastAssistantMsg.append(event.token)
+        messages.add(Message(UUID.randomUUID().toString(),
+            lastAssistantMsg.toString(), MessageType.ASSISTANT))
+        messageAdapter.notifyItemInserted(messages.size - 1)
+    }
+}
+
+is AgentEvent.AssistantMessage -> {
+    val lastIdx = messages.size - 1
+    if (lastIdx >= 0 && messages[lastIdx].type == MessageType.ASSISTANT) {
+        messages.removeAt(lastIdx)
+        messages.add(Message(UUID.randomUUID().toString(),
+            event.message, MessageType.ASSISTANT))
+        messageAdapter.notifyItemChanged(messages.size - 1)
+    } else {
+        messages.add(Message(UUID.randomUUID().toString(),
+            event.message, MessageType.ASSISTANT))
+        messageAdapter.notifyItemInserted(messages.size - 1)
+    }
+}
+```
+
+`ToolResult` 的 insert 位置逻辑原本就处理了"末尾是否有占位泡"两种情况,不动。
+
+---
+
+### 问题 2：通话成功后 LLM 多余总结
+
+#### 现象
+
+`call_phone` 成功后,LLM 紧接着又回一句类似"正在尝试拨打 +86..."。前一句助手前言("我将为你拨打这个号码") + 绿色 ToolResult 泡已经覆盖了该信息,这一句完全是噪声,而且多耗一轮推理时间。
+
+#### 设计
+
+- 在 `ToolDefinition` 加一个 `requireFollowUp: Boolean = true`,默认 `true`,所有现成工具行为不变
+- `CallPhoneTool` 显式置 `false`
+- `AgentLoop` 在工具执行后检查这个标志,若是 fire-and-forget 就 `break` 跳出循环(不进入第二轮)
+
+#### 改动
+
+**`lib/src/main/java/com/arm/aichat/tool/Tool.kt`**
+
+```kotlin
+data class ToolDefinition(
+    val name: String,
+    val description: String,
+    val parameters: List<ToolParameter>,
+    /**
+     * Whether the AgentLoop should feed this tool's result back to the LLM
+     * and ask for a natural-language summary (default true).
+     *
+     * Set to false for "fire-and-forget" tools whose action itself is the
+     * user-facing confirmation (e.g. CallPhoneTool, which surfaces the
+     * system in-call UI and a "Calling ..." tool-result bubble in chat).
+     */
+    val requireFollowUp: Boolean = true,
+)
+```
+
+**`lib/src/main/java/com/arm/aichat/tool/CallPhoneTool.kt`**
+
+```kotlin
+override val definition = ToolDefinition(
+    name = "call_phone",
+    description = "Call a phone number. The phone number MUST include country code (e.g., +86).",
+    parameters = listOf(
+        ToolParameter("phone_number", "string",
+            "Phone number with country code, e.g. +8613800138000"),
+    ),
+    // The act of placing the call is the user-facing confirmation (system
+    // in-call UI + green "Calling ..." tool-result bubble). No need for the
+    // model to parrot "I am now trying to call X" back as a second turn.
+    requireFollowUp = false,
+)
+```
+
+**`lib/src/main/java/com/arm/aichat/agent/AgentLoop.kt`**
+
+```kotlin
+val result = toolRegistry.execute(toolCall.name, toolCall.params)
+emit(AgentEvent.ToolResult(toolCall.name, result))
+Log.i(TAG, "Tool result (${toolCall.name}): ${result.take(50)}...")
+
+val tool = toolRegistry.get(toolCall.name)
+if (tool?.definition?.requireFollowUp == false) {
+    Log.i(TAG, "Tool ${toolCall.name} is fire-and-forget, skipping follow-up turn")
+    break
+}
+
+currentPrompt = buildToolResultPrompt(toolCall.name, result)
+// Continue loop
+```
+
+`read_file` / `write_file` / `list_files` / `run_shell` 全部保持默认 `requireFollowUp = true`,行为完全不变 — 工具结果仍会回灌 LLM 拿自然语言总结。
+
+---
+
+### 问题 3：联系人拨打 + 失败仍需 LLM 总结
+
+#### 需求细化
+
+1. `call_phone` 接受联系人名(`contact_name`),通过系统 `ContactsContract.ContentProvider` 查询号码
+2. `requireFollowUp` 从"工具级别静态"升级到"结果级别动态":成功时跳过第二轮,失败时仍要 LLM 解释
+
+#### 设计
+
+- 给 `Tool` 接口加默认实现的 `requiresFollowUp(result)`,默认行为取 `definition.requireFollowUp`,工具按需覆写
+- `CallPhoneTool` 覆写:`result.startsWith("Error:")` -> `true`(让 LLM 解释),否则 `false`(fire-and-forget)
+- 联系人查询:`case-insensitive substring` 匹配 `Phone.DISPLAY_NAME`,取第一条号码
+
+#### 改动
+
+**`lib/src/main/java/com/arm/aichat/tool/Tool.kt`**
+
+```kotlin
+interface Tool {
+    val definition: ToolDefinition
+    suspend fun execute(params: Map<String, String>): String
+
+    /**
+     * Whether the AgentLoop should send this tool's result back to the LLM
+     * for a natural-language follow-up turn.
+     *
+     * The default is the static [ToolDefinition.requireFollowUp] flag. Tools
+     * whose follow-up need depends on the runtime result (e.g. CallPhoneTool
+     * suppresses the summary on a successful call but keeps it on error so
+     * the model can explain the failure) override this method.
+     */
+    fun requiresFollowUp(result: String): Boolean = definition.requireFollowUp
+}
+```
+
+**`lib/src/main/java/com/arm/aichat/tool/CallPhoneTool.kt`** (整文件重写)
+
+要点:
+- 两个互斥的 optional 参数:`phone_number` / `contact_name`,校验"恰好一个"
+- `contact_name` 时通过 `ContactsContract.CommonDataKinds.Phone.CONTENT_URI` 查询
+- 校验 `READ_CONTACTS` 权限;缺失或查不到都返回 `Error: ...`
+- 校验 `CALL_PHONE` 权限
+- `requiresFollowUp` 实现:
+
+```kotlin
+override fun requiresFollowUp(result: String): Boolean = result.startsWith("Error:")
+```
+
+- 联系人查询核心:
+
+```kotlin
+private fun lookupContactNumber(name: String): ResolvedNumber? {
+    if (context.checkSelfPermission(Manifest.permission.READ_CONTACTS)
+        != PackageManager.PERMISSION_GRANTED) return null
+    return try {
+        val projection = arrayOf(
+            ContactsContract.CommonDataKinds.Phone.NUMBER,
+            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+        )
+        // Case-insensitive substring match.
+        val selection = "LOWER(${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME}) LIKE ?"
+        val selectionArgs = arrayOf("%${name.lowercase()}%")
+        context.contentResolver.query(
+            ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+            projection, selection, selectionArgs,
+            "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} ASC"
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val numIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+                val nameIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+                val number = if (numIdx >= 0) cursor.getString(numIdx) else null
+                val matchedName = if (nameIdx >= 0) cursor.getString(nameIdx) else null
+                if (number.isNullOrBlank()) null
+                else ResolvedNumber(number = number, label = "${matchedName ?: name} ($number)")
+            } else null
+        }
+    } catch (e: Exception) { null }
+}
+```
+
+**`lib/src/main/java/com/arm/aichat/agent/AgentLoop.kt`**
+
+follow-up 检查换成结果感知版:
+
+```kotlin
+val result = toolRegistry.execute(toolCall.name, toolCall.params)
+emit(AgentEvent.ToolResult(toolCall.name, result))
+Log.i(TAG, "Tool result (${toolCall.name}): ${result.take(50)}...")
+
+// Per-result follow-up decision
+val tool = toolRegistry.get(toolCall.name)
+if (tool != null && !tool.requiresFollowUp(result)) {
+    Log.i(TAG, "Tool ${toolCall.name} does not need a follow-up turn, ending chat")
+    break
+}
+
+currentPrompt = buildToolResultPrompt(toolCall.name, result)
+```
+
+system prompt 增加两条 `call_phone` 示例,引导模型按用户语义选参数:
+
+```
+   我来帮你拨打张三的电话。
+   <tool_call>{"name":"call_phone","params":{"contact_name":"张三"}}</tool_call>
+   让我拨打 +8613800138000。
+   <tool_call>{"name":"call_phone","params":{"phone_number":"+8613800138000"}}</tool_call>
+```
+
+**`app/src/main/AndroidManifest.xml`**
+
+```xml
+<uses-permission android:name="android.permission.CALL_PHONE" />
+<!-- Required by CallPhoneTool when invoked with the contact_name parameter. -->
+<uses-permission android:name="android.permission.READ_CONTACTS" />
+```
+
+#### 行为对照
+
+| 场景 | 流程 |
+|---|---|
+| 联系名拨打(成功) | user bubble -> "我来帮你拨打张三" -> 工具调用泡 -> "Calling 张三 (138...)" -> Completed |
+| 联系名拨打(失败) | user bubble -> "我来帮你拨打张三" -> 工具调用泡 -> Error -> LLM 解释("抱歉,通讯录权限未授予...") -> Completed |
+| 直拨(成功) | user bubble -> "让我拨打 +86..." -> 工具调用泡 -> "Calling +86..." -> Completed |
+| 直拨(失败,无权限) | user bubble -> "让我拨打 +86..." -> 工具调用泡 -> Error -> LLM 解释 -> Completed |
+
+---
+
+### 文件变更(2026-07-08 增量)
+
+| 文件 | 改动 |
+|------|------|
+| `app/.../MainActivity.kt` | 问题 1:`onStop` 不再 cancel + `try/finally` 兜底 + 工具调用后懒创建助手泡 |
+| `lib/.../tool/Tool.kt` | 问题 2:`ToolDefinition.requireFollowUp`;问题 3:`Tool.requiresFollowUp(result)` 接口方法 |
+| `lib/.../tool/CallPhoneTool.kt` | 问题 2:`requireFollowUp = false`;问题 3:整文件重写(联系人查询 + 结果感知 follow-up) |
+| `lib/.../agent/AgentLoop.kt` | 问题 2:`requireFollowUp` 检查;问题 3:换成 `requiresFollowUp(result)` + system prompt 加 `call_phone` 示例 |
+| `app/src/main/AndroidManifest.xml` | 问题 3:新增 `READ_CONTACTS` 权限 |
+
+### 验证
+
+```bash
+./gradlew :lib:compileDebugKotlin
+./gradlew :app:assembleDebug
+```
+
+### 手动测试脚本
+
+1. 模型加载完,授予 `CALL_PHONE` + `READ_CONTACTS`
+2. 输入 `打电话给张三` -> 期望:不用自然语言总结,直接 Completed,空泡消失
+3. 输入 `拨打 +8612345678901`(故意一个空号) -> 期望:通话失败时 LLM 解释
+4. 输入 `打电话给 XXX`(通讯录里没有) -> 期望:LLM 解释"未找到联系人,请授予通讯录权限..."
+5. 通话中按 Home 键回到桌面再回来 -> 期望:不卡死,能继续输入
+
+### 待跟进事项
+
+- **运行时权限申请**: 当前 manifest 声明了权限,但首次进入使用不会主动弹系统对话框。需要在 `MainActivity.handleSelectedModel` 或首次调用工具时用 `ActivityResultContracts.RequestPermission` 申请 `CALL_PHONE` / `READ_CONTACTS`。错误路径仍走 `"Error: ... permission not granted"`,CallPhoneTool 不用改。
+- **多号码联系人**: 当前 `moveToFirst()` 取第一条,没有 mobile/home 区分。后续可加 `number_type` 参数让 LLM 指定。
+- **国际号处理**: 联系人里存的号未必带 `+86`,目前原样拨号。如需规范化可加 `TelephonyManager` 注入国家码。
