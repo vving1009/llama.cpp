@@ -2,6 +2,7 @@ package com.arm.aichat.agent
 
 import android.util.Log
 import com.arm.aichat.InferenceEngine
+import com.arm.aichat.mcp.McpManager
 import com.arm.aichat.skill.SkillRegistry
 import com.arm.aichat.tool.*
 import kotlinx.coroutines.flow.*
@@ -15,7 +16,8 @@ import kotlinx.coroutines.flow.*
 class AgentLoop(
     private val inferenceEngine: InferenceEngine,
     private val toolRegistry: ToolRegistry,
-    private val skillRegistry: SkillRegistry
+    private val skillRegistry: SkillRegistry,
+    private val mcpManager: McpManager
 ) {
 
     companion object {
@@ -95,19 +97,30 @@ class AgentLoop(
                     emit(AgentEvent.ToolCallDetected(toolCall.name, toolCall.params))
                     Log.i(TAG, "Tool call: ${toolCall.name}(${toolCall.params})")
 
-                    // 执行工具
-                    val result = toolRegistry.execute(toolCall.name, toolCall.params)
+                    // Route MCP tools to McpManager, built-in tools to ToolRegistry
+                    val result = if (mcpManager.isMcpTool(toolCall.name)) {
+                        try {
+                            mcpManager.callTool(toolCall.name, toolCall.params)
+                        } catch (e: Exception) {
+                            "Error: MCP tool '${toolCall.name}' failed: ${e.message}"
+                        }
+                    } else {
+                        toolRegistry.execute(toolCall.name, toolCall.params)
+                    }
                     emit(AgentEvent.ToolResult(toolCall.name, result))
                     Log.i(TAG, "Tool result (${toolCall.name}): ${result.take(50)}...")
 
-                    // Per-result follow-up decision: tools whose action is the
-                    // user-facing confirmation (e.g. call_phone on success)
-                    // return false from requiresFollowUp() and we skip the
-                    // second LLM turn that would otherwise produce a redundant
-                    // summary. On error the tool returns true so the LLM can
-                    // explain the failure in natural language.
-                    val tool = toolRegistry.get(toolCall.name)
-                    if (tool != null && !tool.requiresFollowUp(result)) {
+                    // Per-result follow-up decision: MCP tools always need a
+                    // follow-up turn so the LLM can summarize the result.
+                    // Built-in tools may skip the follow-up for fire-and-forget
+                    // actions (e.g. call_phone on success).
+                    val skipFollowUp = if (mcpManager.isMcpTool(toolCall.name)) {
+                        false // MCP tools always need summarization
+                    } else {
+                        val tool = toolRegistry.get(toolCall.name)
+                        tool != null && !tool.requiresFollowUp(result)
+                    }
+                    if (skipFollowUp) {
                         Log.i(TAG, "Tool ${toolCall.name} does not need a follow-up turn, ending chat")
                         break
                     }
@@ -156,6 +169,12 @@ class AgentLoop(
             appendLine()
             appendLine(toolRegistry.buildToolDescriptions())
             appendLine()
+
+            // Append MCP tool descriptions if any MCP servers are connected
+            if (mcpManager.hasTools()) {
+                appendLine(mcpManager.buildToolDescriptions())
+                appendLine()
+            }
             // Append skill descriptions
             val skillDesc = skillRegistry.buildSkillDescriptions()
             if (skillDesc.isNotEmpty()) {

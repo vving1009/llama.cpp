@@ -7,6 +7,8 @@
     <uses-permission android:name="android.permission.CALL_PHONE" />
     <!-- Required by CallPhoneTool when invoked with the contact_name parameter. -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <!-- Required for TCP MCP transport (remote servers); not needed for LocalSocket only. -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="true"

@@ -17,6 +17,7 @@ import com.arm.aichat.AiChat
 import com.arm.aichat.InferenceEngine
 import com.arm.aichat.agent.AgentEvent
 import com.arm.aichat.agent.AgentLoop
+import com.arm.aichat.mcp.McpManager
 import com.arm.aichat.skill.InvokeSkillTool
 import com.arm.aichat.skill.SkillRegistry
 import com.arm.aichat.tool.ToolRegistry
@@ -45,6 +46,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var engine: InferenceEngine
     private lateinit var toolRegistry: ToolRegistry
     private lateinit var skillRegistry: SkillRegistry
+    private lateinit var mcpManager: McpManager
     private lateinit var agentLoop: AgentLoop
     private var generationJob: Job? = null
 
@@ -125,7 +127,13 @@ class MainActivity : AppCompatActivity() {
                     toolRegistry = ToolRegistry(applicationContext)
                     skillRegistry = SkillRegistry(applicationContext)
                     toolRegistry.register(InvokeSkillTool(skillRegistry))
-                    agentLoop = AgentLoop(engine, toolRegistry, skillRegistry)
+
+                    // Initialize MCP manager (connect to configured servers)
+                    mcpManager = McpManager(applicationContext)
+                    mcpManager.loadAndConnect()
+                    Log.i(TAG, "MCP: ${if (mcpManager.hasTools()) mcpManager.getToolDefinitions().size else 0} tools discovered")
+
+                    agentLoop = AgentLoop(engine, toolRegistry, skillRegistry, mcpManager)
                     // thinkingEnabled=false suppresses empty <thinking> tags from Qwen3 models
                     agentLoop.initialize(thinkingEnabled = false)
 
@@ -360,6 +368,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        lifecycleScope.launch {
+            mcpManager.disconnectAll()
+        }
         engine.destroy()
         super.onDestroy()
     }

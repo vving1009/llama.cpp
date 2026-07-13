@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "example_local": {
+      "address": "com.example.mcp.server"
+    },
+    "example_tcp": {
+      "host": "192.168.1.100",
+      "port": 5000
+    }
+  }
+}
