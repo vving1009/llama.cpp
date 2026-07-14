@@ -20,6 +20,8 @@ import com.arm.aichat.agent.AgentLoop
 import com.arm.aichat.mcp.McpManager
 import com.arm.aichat.skill.InvokeSkillTool
 import com.arm.aichat.skill.SkillRegistry
+import com.arm.aichat.subagent.SubAgentSettings
+import com.arm.aichat.tool.AgentTool
 import com.arm.aichat.tool.ToolRegistry
 import com.arm.aichat.gguf.GgufMetadata
 import com.arm.aichat.gguf.GgufMetadataReader
@@ -127,6 +129,14 @@ class MainActivity : AppCompatActivity() {
                     toolRegistry = ToolRegistry(applicationContext)
                     skillRegistry = SkillRegistry(applicationContext)
                     toolRegistry.register(InvokeSkillTool(skillRegistry))
+
+                    // Register the AgentTool for sub-agent execution (remote API)
+                    val subAgentSettings = SubAgentSettings(
+                        apiBase = "https://api.openai.com/v1",
+                        apiKey = "",
+                        model = "gpt-4o-mini"
+                    )
+                    toolRegistry.register(AgentTool(subAgentSettings, toolRegistry))
 
                     // Initialize MCP manager (connect to configured servers)
                     mcpManager = McpManager(applicationContext)
@@ -278,6 +288,20 @@ class MainActivity : AppCompatActivity() {
                                             "${event.toolName}: $resultPreview", MessageType.TOOL_RESULT))
                                         messageAdapter.notifyItemInserted(insertIdx)
                                         Log.d(TAG, "[trace] AFTER ToolResult insertIdx=$insertIdx newTailType=${messages.lastOrNull()?.type} msgCount=${messages.size}")
+                                    }
+                                    is AgentEvent.SubAgentToken -> {
+                                        // Stream sub-agent tokens into the last TOOL_RESULT bubble,
+                                        // or create one if it doesn't exist yet.
+                                        val lastIdx = messages.size - 1
+                                        if (lastIdx >= 0 && messages[lastIdx].type == MessageType.TOOL_RESULT) {
+                                            val updated = messages[lastIdx].content + event.token
+                                            messages.removeAt(lastIdx)
+                                            messages.add(Message(UUID.randomUUID().toString(), updated, MessageType.TOOL_RESULT))
+                                            messageAdapter.notifyItemChanged(messages.size - 1)
+                                        } else {
+                                            messages.add(Message(UUID.randomUUID().toString(), event.token, MessageType.TOOL_RESULT))
+                                            messageAdapter.notifyItemInserted(messages.size - 1)
+                                        }
                                     }
                                     is AgentEvent.AssistantMessage -> {
                                         Log.d(TAG, "[trace] EVT AssistantMessage len=${event.message.length} content='${event.message.take(60)}' msgCount=${messages.size}")

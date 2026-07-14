@@ -1,5 +1,8 @@
 package com.arm.aichat.tool
 
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+
 /**
  * 工具定义（类似 Python 版 tool_definitions 中的单个工具）
  */
@@ -33,6 +36,17 @@ data class ToolParameter(
 interface Tool {
     val definition: ToolDefinition
     suspend fun execute(params: Map<String, String>): String
+
+    /**
+     * Execute the tool with streaming output.
+     *
+     * Default implementation wraps [execute] in a single-emission flow.
+     * Tools that support progressive streaming (e.g. SubAgentTool) override
+     * this to emit tokens as they arrive.
+     */
+    suspend fun executeStreaming(params: Map<String, String>): Flow<String> = flow {
+        emit(execute(params))
+    }
 
     /**
      * Whether the AgentLoop should send this tool's result back to the LLM

@@ -1,6 +1,8 @@
 package com.arm.aichat.tool
 
 import android.content.Context
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 
 /**
  * 工具注册中心
@@ -37,6 +39,19 @@ class ToolRegistry(context: Context) {
         val tool = tools[name]
             ?: return "Error: Unknown tool '$name'. Available tools: ${tools.keys.joinToString(", ")}"
         return tool.execute(params)
+    }
+
+    /**
+     * Execute the tool with streaming output.
+     *
+     * Delegates to the tool's [Tool.executeStreaming] method. For most tools
+     * this emits a single item with the complete result. Streaming-capable
+     * tools (e.g. SubAgentTool) emit tokens progressively.
+     */
+    suspend fun executeStreaming(name: String, params: Map<String, String>): Flow<String> {
+        val tool = tools[name]
+            ?: return flow { emit("Error: Unknown tool '$name'. Available tools: ${tools.keys.joinToString(", ")}") }
+        return tool.executeStreaming(params)
     }
 
     /**

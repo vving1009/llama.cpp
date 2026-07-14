@@ -105,7 +105,14 @@ class AgentLoop(
                             "Error: MCP tool '${toolCall.name}' failed: ${e.message}"
                         }
                     } else {
-                        toolRegistry.execute(toolCall.name, toolCall.params)
+                        // Use streaming execution for built-in tools
+                        val resultBuffer = StringBuilder()
+                        toolRegistry.executeStreaming(toolCall.name, toolCall.params)
+                            .collect { token ->
+                                resultBuffer.append(token)
+                                emit(AgentEvent.SubAgentToken(token))
+                            }
+                        resultBuffer.toString()
                     }
                     emit(AgentEvent.ToolResult(toolCall.name, result))
                     Log.i(TAG, "Tool result (${toolCall.name}): ${result.take(50)}...")
@@ -181,6 +188,18 @@ class AgentLoop(
                 appendLine(skillDesc)
                 appendLine()
             }
+
+            // Append agent tool description
+            appendLine("### agent")
+            appendLine("Launch a sub-agent to handle a task autonomously. Sub-agents have isolated context and access to their own tools.")
+            appendLine("Parameters:")
+            appendLine("- type: string - Agent type: explore (read-only, fast search), plan (read-only, structured planning), general (full tools). Default: general")
+            appendLine("- description: string - Short (3-5 word) description of the task")
+            appendLine("- prompt: string - Detailed task instructions for the sub-agent")
+            appendLine("")
+            appendLine("Use the agent tool when the task requires independent research, exploration, or analysis that would benefit from isolated context.")
+            appendLine()
+
             appendLine("## 规则 Rules (IMPORTANT — follow strictly)")
             appendLine("1. Analyze the user's request. If the user speaks Chinese, respond in Chinese.")
             appendLine()
@@ -237,6 +256,8 @@ sealed class AgentEvent {
     data class AssistantMessage(val message: String) : AgentEvent()
     data class ToolCallDetected(val toolName: String, val params: Map<String, String>) : AgentEvent()
     data class ToolResult(val toolName: String, val result: String) : AgentEvent()
+    /** Streaming token from sub-agent execution (for real-time UI display). */
+    data class SubAgentToken(val token: String) : AgentEvent()
     data class Error(val message: String) : AgentEvent()
     object Completed : AgentEvent()
 }
