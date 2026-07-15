@@ -31,15 +31,18 @@ object SkillLoader {
         source: String,
         skills: MutableMap<String, SkillDefinition>
     ) {
+        Log.i(TAG, "loadFromDir: $skillsDir, $source, $skills")
         if (!skillsDir.isDirectory) return
 
         val entries = skillsDir.listFiles() ?: return
         for (entry in entries) {
+            Log.i(TAG, "listFiles: entry=$entry")
             if (!entry.isDirectory) continue
             val skillFile = File(entry, SKILL_FILE_NAME)
             if (!skillFile.exists()) continue
 
             val skill = parseSkillFile(skillFile, source, entry.absolutePath)
+            Log.i(TAG, "skill: skill=$skill")
             if (skill != null) {
                 skills[skill.name] = skill
                 Log.d(TAG, "Loaded skill '${skill.name}' from ${skillFile.absolutePath}")

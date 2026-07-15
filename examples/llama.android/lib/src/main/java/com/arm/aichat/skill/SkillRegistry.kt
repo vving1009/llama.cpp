@@ -154,7 +154,7 @@ class SkillRegistry(private val context: Context) {
      * Creates the directory if it doesn't exist.
      */
     private fun getUserSkillsDir(): File {
-        val dir = File(context.filesDir, SKILLS_DIR_NAME)
+        val dir = File(context.getExternalFilesDir(null), SKILLS_DIR_NAME)
         if (!dir.exists()) {
             dir.mkdirs()
         }
