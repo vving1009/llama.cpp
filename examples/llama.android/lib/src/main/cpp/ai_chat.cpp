@@ -2,8 +2,10 @@
 #include <jni.h>
 #include <iomanip>
 #include <cmath>
+#include <chrono>
 #include <string>
 #include <unistd.h>
+#include <dlfcn.h>
 #include <sampling.h>
 
 #include "logging.h"
@@ -62,6 +64,14 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_init(JNIEnv *env, jobject /*unu
     // Set llama log handler to Android
     llama_log_set(aichat_android_log_callback, nullptr);
 
+    // libggml-opencl.so carries DT_NEEDED libOpenCL.so. We ship no libOpenCL
+    // in the APK; the dynamic linker resolves it to the device's vendor driver
+    // (/vendor/lib64/libOpenCL.so) at load time, so clGetPlatformIDs hits the
+    // real Adreno driver instead of a Khronos ICD loader (which finds no
+    // /system/vendor/Khronos/OpenCL/vendors/*.icd on Android). The app must
+    // also declare <uses-native-library android:name="libOpenCL.so"> in the
+    // manifest, else the vendor lib stays outside the app's linker namespace.
+
     // Loading all CPU backend variants
     const auto *path_to_backend = env->GetStringUTFChars(nativeLibDir, 0);
     LOGi("Loading backends from %s", path_to_backend);
@@ -75,8 +85,9 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_init(JNIEnv *env, jobject /*unu
 
 extern "C"
 JNIEXPORT jint JNICALL
-Java_com_arm_aichat_internal_InferenceEngineImpl_load(JNIEnv *env, jobject, jstring jmodel_path) {
+Java_com_arm_aichat_internal_InferenceEngineImpl_load(JNIEnv *env, jobject, jstring jmodel_path, jint jn_gpu_layers) {
     llama_model_params model_params = llama_model_default_params();
+    model_params.n_gpu_layers = jn_gpu_layers;
 
     const auto *model_path = env->GetStringUTFChars(jmodel_path, 0);
     LOGd("%s: Loading model from: \n%s\n", __func__, model_path);
@@ -87,6 +98,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_load(JNIEnv *env, jobject, jstr
         return 1;
     }
     g_model = model;
+    LOGi("%s: LLama model loaded with %d GPU layers", __func__, (int) jn_gpu_layers);
     return 0;
 }
 
@@ -114,6 +126,15 @@ static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT
     ctx_params.n_ubatch = BATCH_SIZE;
     ctx_params.n_threads = n_threads;
     ctx_params.n_threads_batch = n_threads;
+
+    // The OpenCL flash-attention kernels use sub_group_shuffle_xor, which the
+    // Adreno 730 OpenCL C compiler does not support (vector subgroup broadcast
+    // = false). The fa kernel fails to compile and ggml_cl_flash_attn throws
+    // out_of_range looking up the missing kernel, crashing inference. Disable
+    // FA so attention takes the standard matmul path instead. Revisit once the
+    // device driver advertises the subgroup extension.
+    ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+
     auto *context = llama_init_from_model(g_model, ctx_params);
     if (context == nullptr) {
         LOGe("%s: llama_new_context_with_model() returned null)", __func__);
@@ -127,6 +148,10 @@ static common_sampler *new_sampler(float temp) {
     return common_sampler_init(g_model, sparams);
 }
 
+// Forward declaration — defined below prepare(). Returns the comma-separated
+// list of registered non-CPU backends (e.g. "Vulkan"), or "CPU" when none.
+static std::string get_backend();
+
 extern "C"
 JNIEXPORT jint JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_prepare(JNIEnv * /*env*/, jobject /*unused*/) {
@@ -136,6 +161,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_prepare(JNIEnv * /*env*/, jobje
     g_batch = llama_batch_init(BATCH_SIZE, 0, 1);
     g_chat_templates = common_chat_templates_init(g_model, "");
     g_sampler = new_sampler(DEFAULT_SAMPLER_TEMP);
+    LOGi("%s: Prepare done, active backends: %s", __func__, get_backend().c_str());
     return 0;
 }
 
@@ -435,6 +461,9 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processSystemPrompt(
         jobject /*unused*/,
         jstring jsystem_prompt
 ) {
+    using clock_t_ = std::chrono::steady_clock;
+    const auto t_total_begin = clock_t_::now();
+
     // Reset long-term & short-term states
     reset_long_term_states();
     reset_short_term_states();
@@ -442,21 +471,47 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processSystemPrompt(
     // Obtain system prompt from JEnv
     const auto *system_prompt = env->GetStringUTFChars(jsystem_prompt, nullptr);
     LOGd("%s: System prompt received: \n%s", __func__, system_prompt);
+    const auto t_after_reset = clock_t_::now();
+    LOGi("%s: TIMING reset_long_term+short_term_states took %.3f ms",
+         __func__, std::chrono::duration<double, std::milli>(t_after_reset - t_total_begin).count());
+
     std::string formatted_system_prompt(system_prompt);
 
     // Format system prompt if applicable
     const bool has_chat_template = common_chat_templates_was_explicit(g_chat_templates.get());
+    const auto t_before_format = clock_t_::now();
     if (has_chat_template) {
         formatted_system_prompt = chat_add_and_format(ROLE_SYSTEM, system_prompt);
     }
     env->ReleaseStringUTFChars(jsystem_prompt, system_prompt);
+    const auto t_after_format = clock_t_::now();
+    {
+        const double dt = std::chrono::duration<double, std::milli>(t_after_format - t_before_format).count();
+        const size_t in_len  = system_prompt ? std::string(system_prompt).size() : 0;
+        const size_t out_len = formatted_system_prompt.size();
+        LOGi("%s: TIMING jinja_format (chat_add_and_format) took %.3f ms [in=%zu B -> out=%zu B]",
+             __func__, dt, in_len, out_len);
+    }
 
     // Tokenize system prompt
+    const auto t_before_tokenize = clock_t_::now();
     const auto system_tokens = common_tokenize(g_context, formatted_system_prompt,
                                                has_chat_template, has_chat_template);
-    for (auto id: system_tokens) {
-        LOGv("token: `%s`\t -> `%d`", common_token_to_piece(g_context, id).c_str(), id);
+    {
+        const size_t n_tok = system_tokens.size();
+        const bool first5 = n_tok <= 5;
+        std::string head;
+        head.reserve(120);
+        for (size_t i = 0; first5 && i < n_tok; ++i) {
+            head += common_token_to_piece(g_context, system_tokens[i]);
+            head += ' ';
+        }
+        LOGi("%s: TIMING tokenize took %.3f ms [tokens=%zu, head_first_five='%s']",
+             __func__,
+             std::chrono::duration<double, std::milli>(clock_t_::now() - t_before_tokenize).count(),
+             n_tok, head.c_str());
     }
+    // NOTE: per-token LOGv kept (already gated by LOG_MIN_LEVEL).
 
     // Handle context overflow
     const int max_batch_size = DEFAULT_CONTEXT_SIZE - OVERFLOW_HEADROOM;
@@ -467,13 +522,21 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processSystemPrompt(
     }
 
     // Decode system tokens in batches
+    const auto t_before_decode = clock_t_::now();
     if (decode_tokens_in_batches(g_context, g_batch, system_tokens, current_position)) {
         LOGe("%s: llama_decode() failed!", __func__);
         return 2;
     }
+    const double dt_decode = std::chrono::duration<double, std::milli>(clock_t_::now() - t_before_decode).count();
+    LOGi("%s: TIMING decode_tokens_in_batches took %.3f ms [%zu tokens, %.3f us/tok]",
+         __func__, dt_decode,
+         system_tokens.size(),
+         system_tokens.empty() ? 0.0 : (dt_decode * 1000.0) / (double) system_tokens.size());
 
     // Update position
     system_prompt_position = current_position = (int) system_tokens.size();
+    const double dt_total = std::chrono::duration<double, std::milli>(clock_t_::now() - t_total_begin).count();
+    LOGi("%s: TIMING TOTAL took %.3f ms", __func__, dt_total);
     return 0;
 }
 

@@ -18,7 +18,17 @@ interface InferenceEngine {
      *
      * @throws UnsupportedArchitectureException if model architecture not supported
      */
-    suspend fun loadModel(pathToModel: String)
+    suspend fun loadModel(pathToModel: String) =
+        loadModel(pathToModel, nGpuLayers = DEFAULT_N_GPU_LAYERS)
+
+    /**
+     * Load a model, offloading [nGpuLayers] transformer layers to the active
+     * non-CPU backend (e.g. OpenCL/Adreno). 0 keeps everything on CPU; a value
+     * >= the model's layer count (DEFAULT_N_GPU_LAYERS) offloads all layers.
+     *
+     * @throws UnsupportedArchitectureException if model architecture not supported
+     */
+    suspend fun loadModel(pathToModel: String, nGpuLayers: Int)
 
     /**
      * Sends a system prompt to the loaded model
@@ -78,6 +88,10 @@ interface InferenceEngine {
 
     companion object {
         const val DEFAULT_PREDICT_LENGTH = 1024
+
+        // Offload every transformer layer to the non-CPU backend (OpenCL/Adreno)
+        // when one is loaded; the runtime clamps this to the model's layer count.
+        const val DEFAULT_N_GPU_LAYERS = 99
     }
 }
 

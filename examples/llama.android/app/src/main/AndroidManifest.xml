@@ -22,6 +22,14 @@
         android:theme="@style/Theme.AiChatSample"
         >
 
+        <!-- Request the device's vendor OpenCL driver (listed in
+             /vendor/etc/public.libraries.txt) be made loadable in the app's
+             linker namespace, so libggml-opencl.so's DT_NEEDED libOpenCL.so
+             resolves to the real Adreno driver at runtime. -->
+        <uses-native-library
+            android:name="libOpenCL.so"
+            android:required="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true">

@@ -16,7 +16,7 @@ android {
         consumerProguardFiles("consumer-rules.pro")
 
         ndk {
-             abiFilters += listOf("arm64-v8a", "x86_64")
+             abiFilters += listOf("arm64-v8a")
         }
         externalNativeBuild {
             cmake {
@@ -60,6 +60,11 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+        jniLibs {
+            // Don't ship the link-time ICD loader; resolve libOpenCL.so to the
+            // device's vendor driver at runtime (see app/build.gradle.kts).
+            excludes += "**/libOpenCL.so"
         }
     }
 

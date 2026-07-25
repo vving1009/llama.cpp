@@ -44,6 +44,16 @@ android {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
     }
+    packaging {
+        jniLibs {
+            // libOpenCL.so is linked at build time (opencl-sdk/lib) but must NOT
+            // ship in the APK: a bundled Khronos ICD loader would shadow the
+            // device's vendor libOpenCL.so and yield "platform IDs not
+            // available". Let the linker resolve DT_NEEDED libOpenCL.so to the
+            // system vendor driver (/vendor/lib64/libOpenCL.so) at runtime.
+            excludes += "**/libOpenCL.so"
+        }
+    }
 }
 
 dependencies {
