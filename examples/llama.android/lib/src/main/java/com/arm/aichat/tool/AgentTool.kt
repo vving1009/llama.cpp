@@ -78,6 +78,8 @@ class AgentTool(
         }
     }
 
+    override val isStreaming: Boolean = true
+
     /**
      * Create a [SubAgent] for the given type name.
      * Resolves built-in types (explore, plan, general).

@@ -105,12 +105,18 @@ class AgentLoop(
                             "Error: MCP tool '${toolCall.name}' failed: ${e.message}"
                         }
                     } else {
-                        // Use streaming execution for built-in tools
+                        // Only true streaming tools (e.g. AgentTool) emit per-token
+                        // SubAgentToken events. Built-in tools deliver one result
+                        // token here; emitting SubAgentToken would duplicate it
+                        // against the ToolResult below.
+                        val isStreamingTool = toolRegistry.get(toolCall.name)?.isStreaming == true
                         val resultBuffer = StringBuilder()
                         toolRegistry.executeStreaming(toolCall.name, toolCall.params)
                             .collect { token ->
                                 resultBuffer.append(token)
-                                emit(AgentEvent.SubAgentToken(token))
+                                if (isStreamingTool) {
+                                    emit(AgentEvent.SubAgentToken(token))
+                                }
                             }
                         resultBuffer.toString()
                     }

@@ -49,6 +49,14 @@ interface Tool {
     }
 
     /**
+     * True when [executeStreaming] genuinely emits multiple progressive
+     * tokens (e.g. AgentTool). AgentLoop uses this to decide between live
+     * SubAgentToken updates and a single final ToolResult.
+     */
+    val isStreaming: Boolean
+        get() = false
+
+    /**
      * Whether the AgentLoop should send this tool's result back to the LLM
      * for a natural-language follow-up turn.
      *

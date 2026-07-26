@@ -91,7 +91,7 @@ interface InferenceEngine {
 
         // Offload every transformer layer to the non-CPU backend (OpenCL/Adreno)
         // when one is loaded; the runtime clamps this to the model's layer count.
-        const val DEFAULT_N_GPU_LAYERS = 99
+        const val DEFAULT_N_GPU_LAYERS = 0
     }
 }
 
