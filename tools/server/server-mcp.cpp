@@ -1,6 +1,7 @@
 #include "server-mcp.h"
 
-#include <sheredom/subprocess.h>
+#include "common.h"
+#include "subproc.h"
 
 #include <atomic>
 #include <chrono>
@@ -341,7 +342,7 @@ json server_mcp_transport::call_tool(const std::string & tool_name,
 //
 
 struct server_mcp_stdio::process_handle {
-    subprocess_s sp;
+    common_subproc sp;
     FILE * in  = nullptr; // child stdin
     FILE * out = nullptr; // child stdout
     FILE * err = nullptr; // child stderr
@@ -349,43 +350,21 @@ struct server_mcp_stdio::process_handle {
 
 #if defined(_WIN32)
 // config strings are UTF-8 (from JSON) and subprocess.h converts them with CP_UTF8, so inputs must be UTF-8, not the active code page
-static std::wstring windows_utf8_to_wide(const std::string & s) {
-    if (s.empty()) {
-        return std::wstring();
-    }
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int) s.size(), NULL, 0);
-    if (n <= 0) {
-        return std::wstring();
-    }
-    std::wstring w((size_t) n, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int) s.size(), &w[0], n);
-    return w;
-}
-
-static std::string windows_wide_to_utf8(const wchar_t * s, int len /* -1 for NUL-terminated */) {
-    int n = WideCharToMultiByte(CP_UTF8, 0, s, len, NULL, 0, NULL, NULL);
-    if (n <= 0) {
-        return std::string();
-    }
-    std::string out((size_t) n, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, s, len, &out[0], n, NULL, NULL);
-    if (len == -1 && !out.empty() && out.back() == '\0') {
-        out.pop_back(); // drop the terminator WideCharToMultiByte counts for -1
-    }
-    return out;
+static std::string wide_to_utf8(const wchar_t * s, int len /* -1 for NUL-terminated */) {
+    return wstring_to_utf8(len == -1 ? std::wstring(s) : std::wstring(s, s + len));
 }
 #endif
 
 static std::string mcp_resolve_command(const std::string & command) {
 #if defined(_WIN32)
     // For Windows: make sure we handle ".exe" correctly, as well as UTF-8
-    std::wstring wcmd = windows_utf8_to_wide(command);
+    std::wstring wcmd = utf8_to_wstring(command);
     wchar_t      buf[MAX_PATH * 4];
     const DWORD  cap = (DWORD) (sizeof(buf) / sizeof(buf[0]));
 
     auto search = [&](const wchar_t * ext) -> std::string {
         DWORD n = SearchPathW(NULL, wcmd.c_str(), ext, cap, buf, NULL);
-        return (n > 0 && n < cap) ? windows_wide_to_utf8(buf, (int) n) : std::string();
+        return (n > 0 && n < cap) ? wide_to_utf8(buf, (int) n) : std::string();
     };
 
     std::string found = search(NULL); // exact path / already-extensioned / .exe on PATH
@@ -429,7 +408,7 @@ static std::vector<std::string> mcp_parent_env() {
     LPWCH block = GetEnvironmentStringsW();
     if (block) {
         for (LPWCH e = block; *e; e += wcslen(e) + 1) {
-            env.emplace_back(windows_wide_to_utf8(e, -1));
+            env.emplace_back(wide_to_utf8(e, -1));
         }
         FreeEnvironmentStringsW(block);
     }
@@ -483,30 +462,15 @@ bool server_mcp_stdio::start() {
         envp_s = mcp_build_env(config.env);
     }
 
-    auto to_ptrs = [](std::vector<std::string> & v) {
-        std::vector<const char *> p;
-        p.reserve(v.size() + 1);
-        for (auto & s : v) {
-            p.push_back(s.c_str());
-        }
-        p.push_back(nullptr);
-        return p;
-    };
-    auto argv = to_ptrs(argv_s);
-    auto envp = to_ptrs(envp_s);
-
     auto handle = std::make_unique<process_handle>();
-    int rc = subprocess_create_ex(argv.data(), options,
-                                  config.env.empty() ? nullptr : envp.data(),
-                                  config.cwd.empty() ? nullptr : config.cwd.c_str(),
-                                  &handle->sp);
-    if (rc != 0) {
+    bool ok = handle->sp.create(argv_s, options, envp_s, config.cwd.empty() ? nullptr : config.cwd.c_str());
+    if (!ok) {
         SRV_WRN("MCP '%s': failed to spawn '%s'\n", config.name.c_str(), config.command.c_str());
         return false;
     }
-    handle->in  = subprocess_stdin(&handle->sp);
-    handle->out = subprocess_stdout(&handle->sp);
-    handle->err = subprocess_stderr(&handle->sp);
+    handle->in  = handle->sp.stdin_file();
+    handle->out = handle->sp.stdout_file();
+    handle->err = handle->sp.stderr_file();
 
     proc = std::move(handle);
     running.store(true);
@@ -654,14 +618,13 @@ void server_mcp_stdio::join_pumps() {
     to_server.close_write();   // wake the writer if it waits for a message
     from_server.close_write(); // wake any caller waiting for a reply
 
-    subprocess_terminate(&proc->sp); // child death unblocks the blocked fread/fwrite
+    proc->sp.terminate(); // child death unblocks the blocked fread/fwrite
 
     if (writer.joinable()) writer.join();
     if (reader.joinable()) reader.join();
     if (errlog.joinable()) errlog.join();
 
-    subprocess_join(&proc->sp, nullptr); // reap the child: destroy() never waits, so the pid would stay a zombie for the process lifetime
-    subprocess_destroy(&proc->sp); // safe now: no thread touches the FILE* anymore
+    proc->sp.join(); // reap the child: never waiting would leave the pid a zombie for the process lifetime
     proc.reset();
 }
 
@@ -726,7 +689,7 @@ void server_mcp::start(const common_params & params) {
         }
     };
     if (!params.mcp_servers_config.empty()) {
-        std::ifstream f = fs_open_ifstream(params.mcp_servers_config, std::ios::in);
+        std::ifstream f(std::filesystem::u8path(params.mcp_servers_config), std::ios::in);
         if (!f) {
             throw std::runtime_error("failed to open MCP config file: " + params.mcp_servers_config);
         }
